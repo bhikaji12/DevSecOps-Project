@@ -8,9 +8,9 @@ RUN apk update && apk upgrade --no-cache
 
 WORKDIR /app
 
-COPY package.json yarn.lock ./
+COPY package.json package-lock.json ./
 
-RUN yarn install
+RUN npm ci
 
 COPY . .
 
