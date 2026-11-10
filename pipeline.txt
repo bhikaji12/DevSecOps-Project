@@ -1,0 +1,215 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk17'
+        nodejs 'node24'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+        DOCKER_IMAGE = 'bhikaji12/netflix:latest'
+        K8S_SERVER = 'https://(your cluster ip ):(port)'
+        K8S_NAMESPACE = 'netflix'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+            post {
+                success {
+                    echo 'Workspace cleaned successfully!'
+                }
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/bhikaji12/DevSecOps-Project.git'
+            }
+            post {
+                success {
+                    echo 'Git checkout completed successfully!'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                        $SCANNER_HOME/bin/sonar-scanner \
+                        -Dsonar.projectName=Netflix \
+                        -Dsonar.projectKey=Netflix
+                    '''
+                }
+            }
+            post {
+                success {
+                    echo 'SonarQube analysis completed successfully!'
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                script {
+                    waitForQualityGate(
+                        abortPipeline: false,
+                        credentialsId: 'sonar-token'
+                    )
+                }
+            }
+            post {
+                success {
+                    echo 'Quality Gate stage completed!'
+                }
+            }
+        }
+
+        stage('TRIVY FS SCAN') {
+            steps {
+                sh '''
+                    trivy fs . -o trivyfs.txt
+                '''
+            }
+            post {
+                success {
+                    echo 'Trivy filesystem scan completed successfully!'
+                }
+            }
+        }
+
+        stage('TRIVY IMAGE SCAN') {
+            steps {
+                sh '''
+                    trivy image "$DOCKER_IMAGE" -o trivyimage.txt
+                '''
+            }
+            post {
+                success {
+                    echo 'Trivy image scan completed successfully!'
+                }
+            }
+        }
+
+        stage('Check Kubernetes Connection') {
+            steps {
+                withCredentials([
+                    file(
+                        credentialsId: 'k8s-ca-cert',
+                        variable: 'K8S_CA_CERT'
+                    )
+                ]) {
+                    script {
+
+                        def caCert = readFile(
+                            file: env.K8S_CA_CERT
+                        )
+
+                        withKubeConfig([
+                            credentialsId: 'k8s-jenkins-token',
+                            serverUrl: env.K8S_SERVER,
+                            caCertificate: caCert,
+                            namespace: env.K8S_NAMESPACE
+                        ]) {
+
+                            sh '''
+                                echo "Checking Kubernetes connection..."
+
+                                kubectl cluster-info
+
+                                echo "Checking Kubernetes permissions..."
+
+                                kubectl auth can-i create deployments \
+                                    -n ${K8S_NAMESPACE}
+
+                                echo "Kubernetes connection successful."
+                            '''
+                        }
+                    }
+                }
+            }
+            post {
+                success {
+                    echo 'Kubernetes connection verified successfully!'
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withCredentials([
+                    file(
+                        credentialsId: 'k8s-ca-cert',
+                        variable: 'K8S_CA_CERT'
+                    )
+                ]) {
+                    script {
+
+                        def caCert = readFile(
+                            file: env.K8S_CA_CERT
+                        )
+
+                        withKubeConfig([
+                            credentialsId: 'k8s-jenkins-token',
+                            serverUrl: env.K8S_SERVER,
+                            caCertificate: caCert,
+                            namespace: env.K8S_NAMESPACE
+                        ]) {
+
+                            sh '''
+                                 echo "Checking Kubernetes manifests..."
+                                 ls -la Kubernetes/
+
+                                 echo "Applying Kubernetes manifests..."
+
+                                 kubectl apply -f Kubernetes/ -n netflix
+
+                                 echo "Waiting for deployment..."
+
+                                 kubectl rollout status deployment/netflix -n netflix
+
+                            '''
+                        }
+                    }
+                }
+            }
+            post {
+                success {
+                    echo 'Netflix application deployed successfully!'
+                }
+            }
+        }
+    }
+
+    post {
+
+        always {
+            archiveArtifacts(
+                artifacts: 'trivyfs.txt,trivyimage.txt',
+                allowEmptyArchive: true
+            )
+        }
+
+        success {
+            echo '=========================================='
+            echo 'PIPELINE EXECUTED SUCCESSFULLY!'
+            echo 'SonarQube Analysis: COMPLETED'
+            echo 'Quality Gate: COMPLETED'
+            echo 'Trivy FS Scan: COMPLETED'
+            echo 'Trivy Image Scan: COMPLETED'
+            echo 'Kubernetes Connection: VERIFIED'
+            echo 'Kubernetes Deployment: COMPLETED'
+            echo '=========================================='
+        }
+
+        failure {
+            echo 'PIPELINE FAILED! Check Jenkins Console Output.'
+        }
+    }
+}
